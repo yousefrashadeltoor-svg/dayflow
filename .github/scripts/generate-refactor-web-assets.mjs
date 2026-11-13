@@ -3,8 +3,12 @@
  * Not original/credited imagery: replace with the original manifest assets
  * before distributing the app.
  */
-import sharp from "sharp";
 import fs from "node:fs";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
+// Resolve sharp from the extracted project's node_modules, not this script's folder.
+const requireFromProject = createRequire(pathToFileURL(process.cwd() + "/package.json"));
+const sharp = requireFromProject("sharp");
 
 const photos = {
   "dawn.jpg": ["#241b3a", "#7a4a6e", "#d79bb0"],
