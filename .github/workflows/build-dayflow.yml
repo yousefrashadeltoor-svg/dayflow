@@ -95,73 +95,13 @@ jobs:
           print(f"Android project: {project}")
           PY
 
-      - name: Apply Android compatibility and receiver-safety fixes
+      - name: Apply verified Android source repairs
         env:
           APP: ${{ matrix.app }}
           PROJECT: ${{ steps.extract.outputs.project }}
-        shell: bash
         run: |
           set -euo pipefail
-          if [ "$APP" = "refactor" ]; then
-            python3 - "$PROJECT" <<'PY'
-          from pathlib import Path
-          import sys
-
-          project = Path(sys.argv[1])
-          styles = project / "app/src/main/res/values/styles.xml"
-          content = styles.read_text(encoding="utf-8")
-          marker = '        <item name="android:windowLightNavigationBar">true</item>\n'
-          if marker not in content:
-              raise SystemExit("Expected API 27 navigation-bar style declaration was not found")
-          styles.write_text(content.replace(marker, ""), encoding="utf-8")
-
-          v27 = project / "app/src/main/res/values-v27"
-          v27.mkdir(parents=True, exist_ok=True)
-          (v27 / "styles.xml").write_text(
-              """<?xml version="1.0" encoding="utf-8"?>
-          <resources>
-              <style name="Theme.Dayflow" parent="android:style/Theme.Material.Light.NoActionBar">
-                  <item name="android:fontFamily">sans</item>
-                  <item name="android:windowLightStatusBar">true</item>
-                  <item name="android:statusBarColor">#f7f5f0</item>
-                  <item name="android:navigationBarColor">#f7f5f0</item>
-                  <item name="android:windowLightNavigationBar">true</item>
-                  <item name="android:windowActionModeOverlay">true</item>
-              </style>
-          </resources>
-          """,
-              encoding="utf-8",
-          )
-
-          receiver = project / "app/src/main/java/app/dayflow/android/alarm/AlarmScheduler.kt"
-          source = receiver.read_text(encoding="utf-8")
-          old = """class RestoreReceiver : BroadcastReceiver() {
-              override fun onReceive(context: Context, intent: Intent) {
-                  AlarmScheduler.restore(context)
-                  DayflowWidgetProvider.updateAll(context)
-              }
-          }"""
-          new = """class RestoreReceiver : BroadcastReceiver() {
-              override fun onReceive(context: Context, intent: Intent) {
-                  val allowedActions = setOf(
-                      "android.intent.action.BOOT_COMPLETED",
-                      "android.intent.action.TIME_SET",
-                      "android.intent.action.TIMEZONE_CHANGED",
-                      "android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED",
-                  )
-                  if (intent.action !in allowedActions) return
-                  AlarmScheduler.restore(context)
-                  DayflowWidgetProvider.updateAll(context)
-              }
-          }"""
-          if old not in source:
-              raise SystemExit("Expected RestoreReceiver implementation was not found")
-          receiver.write_text(source.replace(old, new), encoding="utf-8")
-          print("Applied API-level style resource split and RestoreReceiver action validation.")
-          PY
-          else
-            echo "No source compatibility patch required for Migrate."
-          fi
+          python3 "$GITHUB_WORKSPACE/.github/scripts/patch-android-sources.py" "$APP" "$PROJECT"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v6
@@ -284,6 +224,11 @@ jobs:
         working-directory: ${{ steps.extract.outputs.project }}
         run: npm ci --no-audit --no-fund
 
+      - name: Generate temporary fallback images for missing Refactor assets
+        if: matrix.app == 'refactor'
+        working-directory: ${{ steps.extract.outputs.project }}
+        run: node "$GITHUB_WORKSPACE/.github/scripts/generate-refactor-web-assets.mjs"
+
       - name: Build production web app
         working-directory: ${{ steps.extract.outputs.project }}
         run: npm run build
@@ -297,6 +242,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: dayflow-${{ matrix.app }}-web
-          path: ${{ steps.extract.outputs.project }}/dist/
+          path: |
+            ${{ steps.extract.outputs.project }}/dist/
+            ${{ steps.extract.outputs.project }}/CI_ASSET_FALLBACK_NOTICE.md
           if-no-files-found: warn
           retention-days: 7
