@@ -9,7 +9,7 @@ def edit(path, old, new, label, required=True):
     if not path.is_file():
         raise SystemExit(f"[{label}] Missing file: {path}")
     s = path.read_text(encoding="utf-8")
-    if new in s:
+    if new and new in s:
         return
     if old not in s:
         if required:
@@ -25,6 +25,11 @@ def add_import(path, line, anchor, label):
         if anchor not in s:
             raise SystemExit(f"[{label}] Import anchor missing: {path}")
         path.write_text(s.replace(anchor, anchor + line + "\n", 1), encoding="utf-8")
+
+def remove_import(path, line):
+    path = Path(path)
+    source = path.read_text(encoding="utf-8")
+    path.write_text(source.replace(line + "\\n", ""), encoding="utf-8")
 
 def migrate(p):
     b = p / "app/src/main/java/app/dayflow/android"
@@ -82,10 +87,144 @@ fun Segmented(options: List<Pair<String, String>>, value: String, modifier: Modi
     w.write_text(s, encoding="utf-8")
     print("[migrate] Patched widget painter constants/receiver")
 
+
+    # Alarm/calendar/robot model compile fixes.
+    add_import(b/"alarm/AlarmScheduler.kt", "import app.dayflow.android.notify.Reminders",
+               "import app.dayflow.android.data.Store\\n", tag)
+    edit(b/"calendar/Calendars.kt",
+         "return CalParts(h.get(java.time.temporal.ChronoField.YEAR_OF_ERA), h.monthValue, h.dayOfMonth)",
+         "return CalParts(h.get(java.time.temporal.ChronoField.YEAR_OF_ERA), h.get(java.time.temporal.ChronoField.MONTH_OF_YEAR), h.get(java.time.temporal.ChronoField.DAY_OF_MONTH))", tag)
+    edit(b/"companion/RobotModel.kt",
+         "class Chain(anchorX: Float, anchorY: Float, segs: Int, len: Float, val kx: Float = 0f, val ky: Float = 0f) {",
+         "class Chain(anchorX: Float, anchorY: Float, segs: Int, len: Float, val kx: Float = 0f, val ky: Float = 0f) {\\n        private val segmentLength = len", tag)
+    edit(b/"companion/RobotModel.kt", "private fun i(n: Int) = n * len",
+         "private fun i(n: Int) = n.toFloat() * segmentLength", tag)
+    overlay = b/"companion/RobotOverlayService.kt"
+    add_import(overlay, "import androidx.compose.ui.graphics.drawscope.scale",
+               "import androidx.compose.ui.graphics.Color\\n", tag)
+    edit(overlay, "val h0 = histPos.peekFirst()", "val h0 = histPos.firstOrNull()", tag)
+    edit(overlay, "androidx.compose.ui.graphics.drawscope.scale(scale, scale, pivot = androidx.compose.ui.geometry.Offset.Zero)",
+         "scale(scale, scale, pivot = androidx.compose.ui.geometry.Offset.Zero)", tag)
+
+    # Replace the invalid canvas transform setup; Compose transforms require nested draw blocks.
+    canvas = b/"decor/DecorCanvas.kt"
+    cs = canvas.read_text(encoding="utf-8")
+    begin = cs.find("    private fun DrawScope.drawParticle(")
+    finish = cs.find("    private fun DrawScope.drawShape(", begin)
+    if begin < 0 or finish < 0:
+        raise SystemExit("[migrate] DecorCanvas drawParticle boundaries not found")
+    draw_particle = """    private fun DrawScope.drawParticle(f: Family, p: Seed, ms: Long) {
+        val t = ((ms / 1000f + p.delay) % p.dur + p.dur) % p.dur / p.dur
+        val alpha = when {
+            t < 0.08f -> t / 0.08f
+            t > 0.9f -> (1f - t) / 0.1f
+            else -> 1f
+        } * p.o
+        val st = Patterns.FAMILY[f] ?: return
+        val x0 = size.width * (if (f == Family.autumn) 0.55f + p.x * 0.0045f else p.x / 100f)
+        val s = p.size
+        when (MOTION[f] ?: Motion.FLOAT) {
+            Motion.FALL -> {
+                val tr = Track.fall(p.dx)
+                val pos = tr.offset(t, p.dx, size.height, 0f)
+                val flip = abs(cos(t * 4f * PI.toFloat()))
+                translate(x0 + pos.x, pos.y * size.height) {
+                    rotate(tr.angle(t), Offset.Zero) {
+                        scale(scaleX = 0.35f + 0.65f * flip, scaleY = 1f, pivot = Offset.Zero) {
+                            drawShape(f, s, alpha, st, p.variant, t)
+                        }
+                    }
+                }
+            }
+            Motion.FLOAT -> {
+                val tr = Track.floatUp(p.dx)
+                val pos = tr.offset(t, p.dx, size.height, 0f)
+                translate(x0 + pos.x, size.height + 60f + pos.y * size.height / 100f) {
+                    drawShape(f, s, alpha, st, p.variant, t)
+                }
+            }
+            Motion.DRIFT -> {
+                val x = x0 - size.width * 0.1f + t * (size.width * 0.1f + p.dx * 3f)
+                val y = size.height * 0.5f * t + sin(t * PI.toFloat() * 2f) * 26f
+                translate(x, y + s) {
+                    rotate(sin(t * 6f) * 18f - 10f, Offset.Zero) {
+                        drawShape(f, s, alpha, st, p.variant, t)
+                    }
+                }
+            }
+            Motion.RAIN -> translate(x0 + t * p.dx * 0.25f, size.height * -0.1f + size.height * 1.2f * t) {
+                drawShape(f, s, alpha, st, p.variant, t)
+            }
+            Motion.FIREFLY -> translate(
+                x0 + sin(t * 4f * PI.toFloat()) * 30f,
+                size.height * (0.25f + 0.6f * ((p.delay % 1f + 1f) % 1f)) + cos(t * 2f * PI.toFloat()) * 30f,
+            ) {
+                drawShape(f, s, alpha, st, p.variant, t)
+            }
+        }
+    }
+
+"""
+    canvas.write_text(cs[:begin] + draw_particle + cs[finish:], encoding="utf-8")
+    remove_import(canvas, "import androidx.compose.ui.graphics.withSave")
+
+    # Respect nullable OkHttp response bodies and coroutine cancellation state.
+    dl = b/"download/DownloadService.kt"
+    ds = dl.read_text(encoding="utf-8")
+    ds = ds.replace("val body = r.body", 'val body = r.body ?: throw IllegalStateException("استجابة التنزيل بدون محتوى")')
+    ds = ds.replace("r.body.string()", 'r.body?.string() ?: throw IllegalStateException("استجابة HLS فارغة")')
+    ds = ds.replace("r.body.bytes()", 'r.body?.bytes() ?: throw IllegalStateException("مقطع HLS فارغ")')
+    dl.write_text(ds, encoding="utf-8")
+    add_import(dl, "import kotlinx.coroutines.isActive", "import kotlinx.coroutines.launch\\n", tag)
+    edit(dl, "private fun isActive(scope: CoroutineScope) = true",
+         "private fun isActive(scope: CoroutineScope) = scope.isActive", tag)
+    la = b/"download/LinkAnalyzer.kt"
+    ls = la.read_text(encoding="utf-8")
+    ls = ls.replace("}.distinct()", "}.distinct().toList()", 1)
+    ls = ls.replace("r.body.string()", 'r.body?.string() ?: throw IllegalStateException("استجابة فارغة")')
+    ls = ls.replace("r.body.byteStream()", '(r.body ?: throw IllegalStateException("استجابة فارغة")).byteStream()')
+    ls = ls.replace("r.body.contentType()", "r.body?.contentType()")
+    la.write_text(ls, encoding="utf-8")
+
+    # Reminders is declared in notify package, not alarm package.
+    remove_import(b/"notify/Notifications.kt", "import app.dayflow.android.alarm.Reminders")
+
+    # Stable seeded PRNG without JavaScript-only runtime APIs.
+    pat = b/"patterns/Patterns.kt"
+    ps = pat.read_text(encoding="utf-8")
+    a = ps.find("    /** Deterministic PRNG")
+    z = ps.find("    fun star(", a)
+    if a < 0 or z < 0: raise SystemExit("[migrate] PRNG function boundaries not found")
+    ps = ps[:a] + """    /** Deterministic seeded PRNG for decoration placement. */
+    fun mulberry32(seed0: Int): () -> Float {
+        val random = java.util.Random(seed0.toLong())
+        return { random.nextFloat() }
+    }
+
+""" + ps[z:]
+    ps = ps.replace("cx - s / 2", "cx - s / 2f")
+    ps = ps.replace("val st = FAMILY[f]", "val st = FAMILY[f] ?: return")
+    pat.write_text(ps, encoding="utf-8")
+
+    alarms = b/"ui/screens/AlarmsScreen.kt"
+    add_import(alarms, "import androidx.compose.foundation.layout.size",
+               "import androidx.compose.foundation.layout.padding\\n", tag)
+    add_import(alarms, "import androidx.compose.foundation.layout.heightIn",
+               "import androidx.compose.foundation.layout.height\\n", tag)
+    caltools = b/"ui/screens/CalendarTools.kt"
+    remove_import(caltools, "import androidx.compose.material.icons.filled.Countdown")
+    edit(caltools, "Icons.Filled.Countdown", "Icons.Filled.Timer", tag)
+    remove_import(b/"ui/screens/MeScreen.kt", "import app.dayflow.android.widget.WidgetCatalogView")
+    wp = b/"widget/WidgetPainter.kt"
+    wp.write_text(wp.read_text(encoding="utf-8").replace("0xCCFFFFFF", "0xCCFFFFFF.toInt()"), encoding="utf-8")
+    print("[migrate] Applied calendar, robot, downloader, notification, icon and layout fixes")
+
 def refactor(p):
     tag = "refactor"
-    edit(p/"app/src/main/res/values/styles.xml",
-         '        <item name="android:windowLightNavigationBar">true</item>\n', "", tag)
+    styles = p/"app/src/main/res/values/styles.xml"
+    styles_text = styles.read_text(encoding="utf-8")
+    styles_text = styles_text.replace('        <item name="android:windowLightNavigationBar">true</item>\\n', "")
+    styles.write_text(styles_text, encoding="utf-8")
     v27 = p/"app/src/main/res/values-v27"
     v27.mkdir(parents=True, exist_ok=True)
     (v27/"styles.xml").write_text("""<?xml version="1.0" encoding="utf-8"?>
