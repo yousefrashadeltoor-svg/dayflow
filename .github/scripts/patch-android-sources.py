@@ -246,7 +246,12 @@ fun Segmented(options: List<Pair<String, String>>, value: String, modifier: Modi
     remove_import(b/"ui/screens/MeScreen.kt", "import app.dayflow.android.widget.WidgetCatalogView")
     wp = b/"widget/WidgetPainter.kt"
     wp.write_text(wp.read_text(encoding="utf-8").replace("0xCCFFFFFF", "0xCCFFFFFF.toInt()"), encoding="utf-8")
-    print("[migrate] Applied calendar, robot, downloader, notification, icon and layout fixes")
+    ui = b/"ui/UiKit.kt"
+    add_import(ui, "import androidx.compose.material3.ExperimentalMaterial3Api",
+               "import androidx.compose.material3.Text", tag)
+    edit(ui, "@Composable\\nfun Honest(text: String) {",
+         "@OptIn(ExperimentalMaterial3Api::class)\\n@Composable\\nfun Honest(text: String) {", tag)
+    print("[migrate] Applied calendar, robot, downloader, notification, icon, layout and opt-in fixes")
 
 def refactor(p):
     tag = "refactor"
