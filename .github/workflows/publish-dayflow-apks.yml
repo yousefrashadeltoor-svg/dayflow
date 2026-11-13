@@ -1,0 +1,46 @@
+name: Publish Dayflow APKs
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download verified Android artifacts
+        uses: actions/download-artifact@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: 43493921464
+          path: downloaded
+
+      - name: Prepare APK release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find downloaded -type f -name '*.apk' -print
+          MIGRATE="$(find downloaded/dayflow-migrate-android -type f -name '*.apk' -print -quit)"
+          REFACTOR="$(find downloaded/dayflow-refactor-android -type f -name '*.apk' -print -quit)"
+          test -n "$MIGRATE"
+          test -n "$REFACTOR"
+          cp "$MIGRATE" release/Dayflow-Migrate.apk
+          cp "$REFACTOR" release/Dayflow-Refactor.apk
+          file release/*.apk
+          sha256sum release/*.apk
+
+      - name: Publish public GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create dayflow-android-2026-11-13 release/Dayflow-Migrate.apk release/Dayflow-Refactor.apk \
+            --repo "${{ github.repository }}" \
+            --title "Dayflow Android APKs" \
+            --notes "Debug APK builds for the Migrate and Refactor projects. Both builds passed unit tests and Android Lint with zero errors. These are installable debug builds, not signed production releases." \
+            --prerelease
