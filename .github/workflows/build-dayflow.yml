@@ -102,6 +102,7 @@ jobs:
           PROJECT: ${{ steps.extract.outputs.project }}
         run: |
           set -euo pipefail
+          python3 -m py_compile "$GITHUB_WORKSPACE/.github/scripts/patch-android-sources.py"
           python3 "$GITHUB_WORKSPACE/.github/scripts/patch-android-sources.py" "$APP" "$PROJECT"
 
       - name: Set up JDK 17
