@@ -1,0 +1,302 @@
+name: Dayflow Android + Web builds
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "migrate-webview-to-jetpack-compose.zip"
+      - "refactor-webview-to-jetpack-compose.zip"
+      - ".github/workflows/build-dayflow.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dayflow-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    name: Android APK — ${{ matrix.app }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: migrate
+            archive: migrate-webview-to-jetpack-compose.zip
+            project: dayflow-android
+          - app: refactor
+            archive: refactor-webview-to-jetpack-compose.zip
+            project: android
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Validate and safely extract source archive
+        id: extract
+        env:
+          ARCHIVE: ${{ matrix.archive }}
+          APP: ${{ matrix.app }}
+          PROJECT_DIR: ${{ matrix.project }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, shutil, stat, zipfile
+          from pathlib import Path, PurePosixPath
+
+          archive = Path(os.environ["ARCHIVE"])
+          app = os.environ["APP"]
+          project_dir = os.environ["PROJECT_DIR"]
+          destination = Path("_dayflow_build") / app
+          if not archive.is_file():
+              raise SystemExit(f"Missing source archive: {archive}")
+          destination.mkdir(parents=True, exist_ok=True)
+
+          with zipfile.ZipFile(archive) as zf:
+              bad = zf.testzip()
+              if bad:
+                  raise SystemExit(f"ZIP CRC validation failed: {bad}")
+              entries = zf.infolist()
+              expanded = sum(x.file_size for x in entries)
+              if len(entries) > 100000 or expanded > 500 * 1024 * 1024:
+                  raise SystemExit("Archive exceeds extraction safety limits")
+              for info in entries:
+                  rel = PurePosixPath(info.filename)
+                  mode = (info.external_attr >> 16) & 0xffff
+                  if rel.is_absolute() or ".." in rel.parts or stat.S_ISLNK(mode):
+                      raise SystemExit(f"Unsafe ZIP entry: {info.filename}")
+                  target = destination.joinpath(*rel.parts)
+                  resolved = target.resolve()
+                  if destination.resolve() not in resolved.parents and resolved != destination.resolve():
+                      raise SystemExit(f"ZIP path escapes destination: {info.filename}")
+                  if info.is_dir():
+                      target.mkdir(parents=True, exist_ok=True)
+                      continue
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  with zf.open(info) as source, target.open("wb") as output:
+                      shutil.copyfileobj(source, output, 1024 * 1024)
+
+          project = destination / project_dir
+          if not (project / "settings.gradle.kts").is_file():
+              raise SystemExit(f"Android Gradle project not found: {project}")
+          # Discard stale build outputs and Gradle caches shipped inside the Refactor ZIP.
+          for child in list(project.rglob("build")) + list(project.rglob(".gradle")):
+              if child.is_dir():
+                  shutil.rmtree(child, ignore_errors=True)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"project={project.resolve()}\n")
+          print(f"Validated {archive.name}: {len(entries)} entries, {expanded} expanded bytes")
+          print(f"Android project: {project}")
+          PY
+
+      - name: Apply Android compatibility and receiver-safety fixes
+        env:
+          APP: ${{ matrix.app }}
+          PROJECT: ${{ steps.extract.outputs.project }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$APP" = "refactor" ]; then
+            python3 - "$PROJECT" <<'PY'
+          from pathlib import Path
+          import sys
+
+          project = Path(sys.argv[1])
+          styles = project / "app/src/main/res/values/styles.xml"
+          content = styles.read_text(encoding="utf-8")
+          marker = '        <item name="android:windowLightNavigationBar">true</item>\n'
+          if marker not in content:
+              raise SystemExit("Expected API 27 navigation-bar style declaration was not found")
+          styles.write_text(content.replace(marker, ""), encoding="utf-8")
+
+          v27 = project / "app/src/main/res/values-v27"
+          v27.mkdir(parents=True, exist_ok=True)
+          (v27 / "styles.xml").write_text(
+              """<?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.Dayflow" parent="android:style/Theme.Material.Light.NoActionBar">
+                  <item name="android:fontFamily">sans</item>
+                  <item name="android:windowLightStatusBar">true</item>
+                  <item name="android:statusBarColor">#f7f5f0</item>
+                  <item name="android:navigationBarColor">#f7f5f0</item>
+                  <item name="android:windowLightNavigationBar">true</item>
+                  <item name="android:windowActionModeOverlay">true</item>
+              </style>
+          </resources>
+          """,
+              encoding="utf-8",
+          )
+
+          receiver = project / "app/src/main/java/app/dayflow/android/alarm/AlarmScheduler.kt"
+          source = receiver.read_text(encoding="utf-8")
+          old = """class RestoreReceiver : BroadcastReceiver() {
+              override fun onReceive(context: Context, intent: Intent) {
+                  AlarmScheduler.restore(context)
+                  DayflowWidgetProvider.updateAll(context)
+              }
+          }"""
+          new = """class RestoreReceiver : BroadcastReceiver() {
+              override fun onReceive(context: Context, intent: Intent) {
+                  val allowedActions = setOf(
+                      "android.intent.action.BOOT_COMPLETED",
+                      "android.intent.action.TIME_SET",
+                      "android.intent.action.TIMEZONE_CHANGED",
+                      "android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED",
+                  )
+                  if (intent.action !in allowedActions) return
+                  AlarmScheduler.restore(context)
+                  DayflowWidgetProvider.updateAll(context)
+              }
+          }"""
+          if old not in source:
+              raise SystemExit("Expected RestoreReceiver implementation was not found")
+          receiver.write_text(source.replace(old, new), encoding="utf-8")
+          print("Applied API-level style resource split and RestoreReceiver action validation.")
+          PY
+          else
+            echo "No source compatibility patch required for Migrate."
+          fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: ""
+
+      - name: Install Android SDK 35
+        run: sdkmanager --install "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "8.9"
+          cache-provider: basic
+
+      - name: Run clean and unit tests
+        env:
+          PROJECT: ${{ steps.extract.outputs.project }}
+        run: gradle --no-daemon --stacktrace -p "$PROJECT" clean testDebugUnitTest
+
+      - name: Assemble debug APK
+        env:
+          PROJECT: ${{ steps.extract.outputs.project }}
+        run: gradle --no-daemon --stacktrace -p "$PROJECT" assembleDebug
+
+      - name: Run Android Lint
+        env:
+          PROJECT: ${{ steps.extract.outputs.project }}
+        run: gradle --no-daemon --stacktrace -p "$PROJECT" lintDebug
+
+      - name: Upload APK and Android diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dayflow-${{ matrix.app }}-android
+          path: |
+            ${{ steps.extract.outputs.project }}/app/build/outputs/apk/debug/*.apk
+            ${{ steps.extract.outputs.project }}/app/build/reports/
+            ${{ steps.extract.outputs.project }}/app/build/test-results/
+          if-no-files-found: warn
+          retention-days: 7
+
+  web:
+    name: Web build — ${{ matrix.app }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: migrate
+            archive: migrate-webview-to-jetpack-compose.zip
+            project: "."
+          - app: refactor
+            archive: refactor-webview-to-jetpack-compose.zip
+            project: "."
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Safely extract web source
+        id: extract
+        env:
+          ARCHIVE: ${{ matrix.archive }}
+          APP: ${{ matrix.app }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, shutil, stat, zipfile
+          from pathlib import Path, PurePosixPath
+
+          archive = Path(os.environ["ARCHIVE"])
+          destination = Path("_dayflow_web") / os.environ["APP"]
+          if not archive.is_file():
+              raise SystemExit(f"Missing archive: {archive}")
+          destination.mkdir(parents=True, exist_ok=True)
+          with zipfile.ZipFile(archive) as zf:
+              bad = zf.testzip()
+              if bad:
+                  raise SystemExit(f"ZIP CRC validation failed: {bad}")
+              entries = zf.infolist()
+              if len(entries) > 100000 or sum(x.file_size for x in entries) > 500 * 1024 * 1024:
+                  raise SystemExit("Archive exceeds extraction safety limits")
+              for info in entries:
+                  rel = PurePosixPath(info.filename)
+                  mode = (info.external_attr >> 16) & 0xffff
+                  if rel.is_absolute() or ".." in rel.parts or stat.S_ISLNK(mode):
+                      raise SystemExit(f"Unsafe ZIP entry: {info.filename}")
+                  target = destination.joinpath(*rel.parts)
+                  resolved = target.resolve()
+                  if destination.resolve() not in resolved.parents and resolved != destination.resolve():
+                      raise SystemExit(f"Unsafe extraction path: {info.filename}")
+                  if info.is_dir():
+                      target.mkdir(parents=True, exist_ok=True)
+                  else:
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      with zf.open(info) as source, target.open("wb") as output:
+                          shutil.copyfileobj(source, output, 1024 * 1024)
+          if not (destination / "package.json").is_file() or not (destination / "package-lock.json").is_file():
+              raise SystemExit("Web project package.json/package-lock.json is missing")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"project={destination.resolve()}\n")
+          print(f"Validated {archive.name}: {len(entries)} entries")
+          PY
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          package-manager-cache: false
+
+      - name: Install locked web dependencies
+        working-directory: ${{ steps.extract.outputs.project }}
+        run: npm ci --no-audit --no-fund
+
+      - name: Build production web app
+        working-directory: ${{ steps.extract.outputs.project }}
+        run: npm run build
+
+      - name: Check TypeScript types
+        working-directory: ${{ steps.extract.outputs.project }}
+        run: npx --no-install tsc --noEmit
+
+      - name: Upload production web bundle
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dayflow-${{ matrix.app }}-web
+          path: ${{ steps.extract.outputs.project }}/dist/
+          if-no-files-found: warn
+          retention-days: 7
