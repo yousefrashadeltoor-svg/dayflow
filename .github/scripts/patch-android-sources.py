@@ -289,6 +289,37 @@ fun Segmented(options: List<Pair<String, String>>, value: String, modifier: Modi
         )
     notif.write_text(ns, encoding="utf-8")
 
+    # Robot overlay foreground-service overload is API 29+; preserve API 26-28 support.
+    overlay = b/"companion/RobotOverlayService.kt"
+    add_import(overlay, "import android.annotation.SuppressLint", "import android.app.Notification", tag)
+    edit(overlay,
+         "        startForeground(Notifications.ID_COMPANION + 9, overlayNotification(), if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0)",
+         "        enterForeground()", tag)
+    overlay_source = overlay.read_text(encoding="utf-8")
+    foreground_anchor = "    private fun overlayNotification(): Notification {"
+    foreground_helper = """    @SuppressLint("NewApi")
+    private fun enterForeground() {
+        val notification = overlayNotification()
+        val notificationId = Notifications.ID_COMPANION + 9
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val serviceType = if (Build.VERSION.SDK_INT >= 34) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            } else {
+                0
+            }
+            startForeground(notificationId, notification, serviceType)
+        } else {
+            @Suppress("DEPRECATION")
+            startForeground(notificationId, notification)
+        }
+    }
+
+"""
+    if "private fun enterForeground()" not in overlay_source:
+        if foreground_anchor not in overlay_source:
+            raise SystemExit("[migrate] RobotOverlayService foreground helper anchor missing")
+        overlay.write_text(overlay_source.replace(foreground_anchor, foreground_helper + foreground_anchor, 1), encoding="utf-8")
+
     # Legacy Android API compatibility and resumable download correctness.
     dl = b/"download/DownloadService.kt"
     ds = dl.read_text(encoding="utf-8")
