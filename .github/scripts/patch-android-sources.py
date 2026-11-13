@@ -20,16 +20,23 @@ def edit(path, old, new, label, required=True):
 
 def add_import(path, line, anchor, label):
     path = Path(path)
-    s = path.read_text(encoding="utf-8")
-    if line not in s:
-        if anchor not in s:
-            raise SystemExit(f"[{label}] Import anchor missing: {path}")
-        path.write_text(s.replace(anchor, anchor + line + "\n", 1), encoding="utf-8")
+    source = path.read_text(encoding="utf-8")
+    lines = source.splitlines()
+    if line in lines:
+        return
+    anchor_text = anchor.replace("\\n", "").strip()
+    try:
+        index = next(i for i, item in enumerate(lines) if item.strip() == anchor_text)
+    except StopIteration:
+        raise SystemExit(f"[{label}] Import anchor missing: {path}")
+    lines.insert(index + 1, line)
+    path.write_text("\\n".join(lines) + "\\n", encoding="utf-8")
 
 def remove_import(path, line):
     path = Path(path)
     source = path.read_text(encoding="utf-8")
-    path.write_text(source.replace(line + "\n", ""), encoding="utf-8")
+    lines = [item for item in source.splitlines() if item.strip() != line.strip()]
+    path.write_text("\\n".join(lines) + "\\n", encoding="utf-8")
 
 def migrate(p):
     b = p / "app/src/main/java/app/dayflow/android"
@@ -222,9 +229,9 @@ fun Segmented(options: List<Pair<String, String>>, value: String, modifier: Modi
 def refactor(p):
     tag = "refactor"
     styles = p/"app/src/main/res/values/styles.xml"
-    styles_text = styles.read_text(encoding="utf-8")
-    styles_text = styles_text.replace('        <item name="android:windowLightNavigationBar">true</item>\n', "")
-    styles.write_text(styles_text, encoding="utf-8")
+    styles_lines = styles.read_text(encoding="utf-8").splitlines()
+    styles_lines = [line for line in styles_lines if 'name="android:windowLightNavigationBar"' not in line]
+    styles.write_text("\\n".join(styles_lines) + "\\n", encoding="utf-8")
     v27 = p/"app/src/main/res/values-v27"
     v27.mkdir(parents=True, exist_ok=True)
     (v27/"styles.xml").write_text("""<?xml version="1.0" encoding="utf-8"?>
