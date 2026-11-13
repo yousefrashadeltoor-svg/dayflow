@@ -112,6 +112,10 @@ fun Segmented(options: List<Pair<String, String>>, value: String, modifier: Modi
     edit(overlay, "val h0 = histPos.peekFirst()", "val h0 = histPos.firstOrNull()", tag)
     edit(overlay, "androidx.compose.ui.graphics.drawscope.scale(scale, scale, pivot = androidx.compose.ui.geometry.Offset.Zero)",
          "scale(scale, scale, pivot = androidx.compose.ui.geometry.Offset.Zero)", tag)
+    edit(overlay, "val scale = size.width / (120f * 0.9f)",
+         "val robotScale = size.width / (120f * 0.9f)", tag)
+    edit(overlay, "scale(scale, scale, pivot = androidx.compose.ui.geometry.Offset.Zero)",
+         "scale(robotScale, robotScale, pivot = androidx.compose.ui.geometry.Offset.Zero)", tag)
 
     # Replace the invalid canvas transform setup; Compose transforms require nested draw blocks.
     canvas = b/"decor/DecorCanvas.kt"
@@ -174,6 +178,24 @@ fun Segmented(options: List<Pair<String, String>>, value: String, modifier: Modi
 """
     canvas.write_text(cs[:begin] + draw_particle + cs[finish:], encoding="utf-8")
     remove_import(canvas, "import androidx.compose.ui.graphics.withSave")
+    edit(canvas,
+         """                    rotate(t * 720f, Offset.Zero)
+                    drawRect(col, topLeft = Offset(-s * 0.14f, -s * 0.05f), size = androidx.compose.ui.geometry.Size(s * 0.28f, s * 0.1f), alpha = alpha)""",
+         """                    rotate(t * 720f, Offset.Zero) {
+                        drawRect(col, topLeft = Offset(-s * 0.14f, -s * 0.05f), size = androidx.compose.ui.geometry.Size(s * 0.28f, s * 0.1f), alpha = alpha)
+                    }""", tag)
+    edit(canvas,
+         """                    rotate(t * 540f, Offset.Zero)
+                    scale(scaleX = 0.4f + 0.6f * abs(cos(t * 8 * PI.toFloat())), scaleY = 1f, pivot = Offset.Zero) {
+                        drawRect(c, topLeft = Offset(-s * 0.16f, -s * 0.06f), size = androidx.compose.ui.geometry.Size(s * 0.32f, s * 0.12f), alpha = alpha)
+                    }""",
+         """                    rotate(t * 540f, Offset.Zero) {
+                        scale(scaleX = 0.4f + 0.6f * abs(cos(t * 8 * PI.toFloat())), scaleY = 1f, pivot = Offset.Zero) {
+                            drawRect(c, topLeft = Offset(-s * 0.16f, -s * 0.06f), size = androidx.compose.ui.geometry.Size(s * 0.32f, s * 0.12f), alpha = alpha)
+                        }
+                    }""", tag)
+    edit(b/"patterns/Patterns.kt", "wave(s, s * 0.05f, 2, 0f,",
+         "wave(s, s * 0.05f, 2f, 0f,", tag)
 
     # Respect nullable OkHttp response bodies and coroutine cancellation state.
     dl = b/"download/DownloadService.kt"
