@@ -8,14 +8,14 @@ def edit(path, old, new, label, required=True):
     path = Path(path)
     if not path.is_file():
         raise SystemExit(f"[{label}] Missing file: {path}")
-    s = path.read_text(encoding="utf-8")
-    if new and new in s:
-        return
-    if old not in s:
+    source = path.read_text(encoding="utf-8")
+    if old not in source:
+        if new and new in source:
+            return
         if required:
             raise SystemExit(f"[{label}] Expected source fragment not found: {path}")
         return
-    path.write_text(s.replace(old, new), encoding="utf-8")
+    path.write_text(source.replace(old, new), encoding="utf-8")
     print(f"[{label}] Patched {path.name}")
 
 def add_import(path, line, anchor, label):
