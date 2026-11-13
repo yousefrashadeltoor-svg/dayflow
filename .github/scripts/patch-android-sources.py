@@ -29,7 +29,7 @@ def add_import(path, line, anchor, label):
 def remove_import(path, line):
     path = Path(path)
     source = path.read_text(encoding="utf-8")
-    path.write_text(source.replace(line + "\\n", ""), encoding="utf-8")
+    path.write_text(source.replace(line + "\n", ""), encoding="utf-8")
 
 def migrate(p):
     b = p / "app/src/main/java/app/dayflow/android"
@@ -90,18 +90,18 @@ fun Segmented(options: List<Pair<String, String>>, value: String, modifier: Modi
 
     # Alarm/calendar/robot model compile fixes.
     add_import(b/"alarm/AlarmScheduler.kt", "import app.dayflow.android.notify.Reminders",
-               "import app.dayflow.android.data.Store\\n", tag)
+               "import app.dayflow.android.data.Store\n", tag)
     edit(b/"calendar/Calendars.kt",
          "return CalParts(h.get(java.time.temporal.ChronoField.YEAR_OF_ERA), h.monthValue, h.dayOfMonth)",
          "return CalParts(h.get(java.time.temporal.ChronoField.YEAR_OF_ERA), h.get(java.time.temporal.ChronoField.MONTH_OF_YEAR), h.get(java.time.temporal.ChronoField.DAY_OF_MONTH))", tag)
     edit(b/"companion/RobotModel.kt",
          "class Chain(anchorX: Float, anchorY: Float, segs: Int, len: Float, val kx: Float = 0f, val ky: Float = 0f) {",
-         "class Chain(anchorX: Float, anchorY: Float, segs: Int, len: Float, val kx: Float = 0f, val ky: Float = 0f) {\\n        private val segmentLength = len", tag)
+         "class Chain(anchorX: Float, anchorY: Float, segs: Int, len: Float, val kx: Float = 0f, val ky: Float = 0f) {\n        private val segmentLength = len", tag)
     edit(b/"companion/RobotModel.kt", "private fun i(n: Int) = n * len",
          "private fun i(n: Int) = n.toFloat() * segmentLength", tag)
     overlay = b/"companion/RobotOverlayService.kt"
     add_import(overlay, "import androidx.compose.ui.graphics.drawscope.scale",
-               "import androidx.compose.ui.graphics.Color\\n", tag)
+               "import androidx.compose.ui.graphics.Color\n", tag)
     edit(overlay, "val h0 = histPos.peekFirst()", "val h0 = histPos.firstOrNull()", tag)
     edit(overlay, "androidx.compose.ui.graphics.drawscope.scale(scale, scale, pivot = androidx.compose.ui.geometry.Offset.Zero)",
          "scale(scale, scale, pivot = androidx.compose.ui.geometry.Offset.Zero)", tag)
@@ -175,7 +175,7 @@ fun Segmented(options: List<Pair<String, String>>, value: String, modifier: Modi
     ds = ds.replace("r.body.string()", 'r.body?.string() ?: throw IllegalStateException("استجابة HLS فارغة")')
     ds = ds.replace("r.body.bytes()", 'r.body?.bytes() ?: throw IllegalStateException("مقطع HLS فارغ")')
     dl.write_text(ds, encoding="utf-8")
-    add_import(dl, "import kotlinx.coroutines.isActive", "import kotlinx.coroutines.launch\\n", tag)
+    add_import(dl, "import kotlinx.coroutines.isActive", "import kotlinx.coroutines.launch\n", tag)
     edit(dl, "private fun isActive(scope: CoroutineScope) = true",
          "private fun isActive(scope: CoroutineScope) = scope.isActive", tag)
     la = b/"download/LinkAnalyzer.kt"
@@ -208,9 +208,9 @@ fun Segmented(options: List<Pair<String, String>>, value: String, modifier: Modi
 
     alarms = b/"ui/screens/AlarmsScreen.kt"
     add_import(alarms, "import androidx.compose.foundation.layout.size",
-               "import androidx.compose.foundation.layout.padding\\n", tag)
+               "import androidx.compose.foundation.layout.padding\n", tag)
     add_import(alarms, "import androidx.compose.foundation.layout.heightIn",
-               "import androidx.compose.foundation.layout.height\\n", tag)
+               "import androidx.compose.foundation.layout.height\n", tag)
     caltools = b/"ui/screens/CalendarTools.kt"
     remove_import(caltools, "import androidx.compose.material.icons.filled.Countdown")
     edit(caltools, "Icons.Filled.Countdown", "Icons.Filled.Timer", tag)
@@ -223,7 +223,7 @@ def refactor(p):
     tag = "refactor"
     styles = p/"app/src/main/res/values/styles.xml"
     styles_text = styles.read_text(encoding="utf-8")
-    styles_text = styles_text.replace('        <item name="android:windowLightNavigationBar">true</item>\\n', "")
+    styles_text = styles_text.replace('        <item name="android:windowLightNavigationBar">true</item>\n', "")
     styles.write_text(styles_text, encoding="utf-8")
     v27 = p/"app/src/main/res/values-v27"
     v27.mkdir(parents=True, exist_ok=True)
