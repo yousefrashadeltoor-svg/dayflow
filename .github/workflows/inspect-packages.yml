@@ -1,0 +1,158 @@
+name: Inspect Dayflow Packages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "migrate-webview-to-jetpack-compose.zip"
+      - "refactor-webview-to-jetpack-compose.zip"
+      - ".github/workflows/inspect-packages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-archives:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate and extract packages without running project code
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import stat
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          root = Path.cwd()
+          work = root / "_dayflow_audit"
+          work.mkdir(exist_ok=True)
+          packages = [
+              ("migrate-webview-to-jetpack-compose.zip", "migrate"),
+              ("refactor-webview-to-jetpack-compose.zip", "refactor"),
+          ]
+          report = {
+              "repository": os.environ.get("GITHUB_REPOSITORY"),
+              "commit": os.environ.get("GITHUB_SHA"),
+              "packages": [],
+          }
+
+          for archive_name, folder in packages:
+              archive = root / archive_name
+              item_report = {"archive": archive_name, "exists": archive.is_file()}
+              if not archive.is_file():
+                  item_report["error"] = "Archive is missing"
+                  report["packages"].append(item_report)
+                  continue
+
+              output = work / folder
+              output.mkdir(parents=True, exist_ok=True)
+              try:
+                  with zipfile.ZipFile(archive) as zf:
+                      bad_crc = zf.testzip()
+                      if bad_crc:
+                          raise RuntimeError("CRC validation failed at " + bad_crc)
+
+                      entries = zf.infolist()
+                      total_uncompressed = sum(i.file_size for i in entries)
+                      item_report.update({
+                          "archive_bytes": archive.stat().st_size,
+                          "entry_count": len(entries),
+                          "uncompressed_bytes": total_uncompressed,
+                          "crc_validation": "passed",
+                          "entries": [],
+                          "skipped_unsafe_entries": [],
+                      })
+                      if len(entries) > 100000 or total_uncompressed > 500 * 1024 * 1024:
+                          raise RuntimeError("Archive exceeds safety extraction limits")
+
+                      for info in entries:
+                          rel = PurePosixPath(info.filename)
+                          mode = (info.external_attr >> 16) & 0xFFFF
+                          is_symlink = stat.S_ISLNK(mode)
+                          if rel.is_absolute() or ".." in rel.parts or is_symlink:
+                              item_report["skipped_unsafe_entries"].append(info.filename)
+                              continue
+                          target = output.joinpath(*rel.parts)
+                          resolved = target.resolve()
+                          if output.resolve() not in resolved.parents and resolved != output.resolve():
+                              item_report["skipped_unsafe_entries"].append(info.filename)
+                              continue
+                          if info.is_dir():
+                              target.mkdir(parents=True, exist_ok=True)
+                          else:
+                              target.parent.mkdir(parents=True, exist_ok=True)
+                              with zf.open(info) as src, target.open("wb") as dst:
+                                  while True:
+                                      chunk = src.read(1024 * 1024)
+                                      if not chunk:
+                                          break
+                                      dst.write(chunk)
+                          item_report["entries"].append({
+                              "path": info.filename,
+                              "size": info.file_size,
+                              "compressed_size": info.compress_size,
+                          })
+                  item_report["extracted_root"] = str(output.relative_to(root))
+              except Exception as exc:
+                  item_report["error"] = f"{type(exc).__name__}: {exc}"
+
+              report["packages"].append(item_report)
+
+          (work / "audit-report.json").write_text(
+              json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+          )
+          lines = ["DAYFLOW PACKAGE AUDIT", ""]
+          for item in report["packages"]:
+              lines += [
+                  f"Archive: {item['archive']}",
+                  f"Exists: {item['exists']}",
+                  f"Entries: {item.get('entry_count', 0)}",
+                  f"Expanded bytes: {item.get('uncompressed_bytes', 0)}",
+                  f"CRC: {item.get('crc_validation', 'not checked')}",
+                  f"Extracted: {item.get('extracted_root', 'no')}",
+                  f"Skipped unsafe entries: {len(item.get('skipped_unsafe_entries', []))}",
+                  f"Error: {item.get('error', 'none')}",
+                  "",
+              ]
+          (work / "audit-report.txt").write_text("\n".join(lines), encoding="utf-8")
+
+          inventory = []
+          for path in sorted(work.rglob("*")):
+              if path.is_file():
+                  inventory.append({
+                      "path": str(path.relative_to(work)),
+                      "size": path.stat().st_size,
+                  })
+          (work / "file-inventory.json").write_text(
+              json.dumps(inventory, indent=2, ensure_ascii=False), encoding="utf-8"
+          )
+          print((work / "audit-report.txt").read_text(encoding="utf-8"))
+          PY
+
+      - name: Package extracted source for review
+        if: always()
+        run: |
+          if [ -d _dayflow_audit ]; then
+            cd _dayflow_audit
+            zip -qr ../dayflow-extracted-source.zip migrate refactor audit-report.json audit-report.txt file-inventory.json
+          fi
+
+      - name: Upload audit material
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dayflow-extracted-source
+          path: |
+            dayflow-extracted-source.zip
+            _dayflow_audit/audit-report.json
+            _dayflow_audit/audit-report.txt
+            _dayflow_audit/file-inventory.json
+          if-no-files-found: warn
+          retention-days: 3
