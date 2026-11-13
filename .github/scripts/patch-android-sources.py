@@ -260,6 +260,226 @@ fun Segmented(options: List<Pair<String, String>>, value: String, modifier: Modi
     else:
         raise SystemExit("[migrate] DFSheet() declaration not found")
     ui.write_text("\n".join(ui_lines) + "\n", encoding="utf-8")
+
+    # Notification posting: enforce the Android 13+ runtime grant at the call site,
+    # and guard against revocation between the permission check and notify().
+    notif = b/"notify/Notifications.kt"
+    add_import(notif, "import android.annotation.SuppressLint", "import android.app.AlarmManager", tag)
+    add_import(notif, "import android.app.Notification", "import android.app.NotificationChannel", tag)
+    helper_anchor = "    private fun openAppPI(ctx: Context, tab: String = \"today\"): PendingIntent {"
+    helper = """    @SuppressLint("MissingPermission")
+    private fun notifyIfAllowed(ctx: Context, id: Int, notification: Notification) {
+        if (!hasPermission(ctx)) return
+        try {
+            NotificationManagerCompat.from(ctx).notify(id, notification)
+        } catch (_: SecurityException) {
+            // The user may revoke notification access between the check and this call.
+        }
+    }
+
+"""
+    ns = notif.read_text(encoding="utf-8")
+    if "private fun notifyIfAllowed(" not in ns:
+        if helper_anchor not in ns: raise SystemExit("[migrate] Notifications helper anchor missing")
+        ns = ns.replace(helper_anchor, helper + helper_anchor, 1)
+    for notification_id in ("ID_ALARM", "ID_SNOOZE", "ID_REVIEW", "ID_COMPANION"):
+        ns = ns.replace(
+            f"if (hasPermission(ctx)) NotificationManagerCompat.from(ctx).notify({notification_id}, n.build())",
+            f"notifyIfAllowed(ctx, {notification_id}, n.build())",
+        )
+    notif.write_text(ns, encoding="utf-8")
+
+    # Legacy Android API compatibility and resumable download correctness.
+    dl = b/"download/DownloadService.kt"
+    ds = dl.read_text(encoding="utf-8")
+    add_import(dl, "import android.annotation.SuppressLint", "import android.app.Notification", tag)
+    add_import(dl, "import android.content.ContentValues", "import android.content.Context", tag)
+    add_import(dl, "import android.content.pm.PackageManager", "import android.content.pm.ServiceInfo", tag)
+    add_import(dl, "import kotlinx.coroutines.currentCoroutineContext", "import kotlinx.coroutines.coroutineScope", tag)
+    add_import(dl, "import kotlinx.coroutines.isActive", "import kotlinx.coroutines.launch", tag)
+    add_import(dl, "import java.util.Locale", "import java.util.concurrent.TimeUnit", tag)
+    ds = dl.read_text(encoding="utf-8")
+    ds = ds.replace(
+        "        startForeground(4999, summaryNotification(), if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC else 0)",
+        """        val foregroundNotification = summaryNotification()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(4999, foregroundNotification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        } else {
+            @Suppress("DEPRECATION")
+            startForeground(4999, foregroundNotification)
+        }"""
+    )
+    ds = ds.replace("while (isActive(this@coroutineScope))", "while (currentCoroutineContext().isActive)")
+    ds = ds.replace("    private fun isActive(scope: CoroutineScope) = true\n\n", "")
+    # Correct notification action Intents: each one must carry the download ID.
+    ds = ds.replace(
+        "progressNotification(item.name, pct, got, total)",
+        "progressNotification(item, pct, got, total)"
+    )
+    ds = ds.replace(
+        "    private fun progressNotification(name: String, pct: Int, got: Long, total: Long): Notification {",
+        "    private fun progressNotification(item: DlItem, pct: Int, got: Long, total: Long): Notification {"
+    )
+    ds = ds.replace(
+        '        val pause = PendingIntent.getService(this, notifId(name), Intent(this, DownloadService::class.java).setAction(ACTION_PAUSE), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)\n'
+        '        val cancelI = PendingIntent.getService(this, notifId(name) + 1, Intent(this, DownloadService::class.java).setAction(ACTION_CANCEL), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)',
+        '        val pauseIntent = Intent(this, DownloadService::class.java).setAction(ACTION_PAUSE).putExtra(EXTRA_ID, item.id)\n'
+        '        val cancelIntent = Intent(this, DownloadService::class.java).setAction(ACTION_CANCEL).putExtra(EXTRA_ID, item.id)\n'
+        '        val pause = PendingIntent.getService(this, notifId(item.id), pauseIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)\n'
+        '        val cancelI = PendingIntent.getService(this, notifId(item.id) + 1, cancelIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)',
+    )
+    ds = ds.replace('.setContentTitle(name)\n', '.setContentTitle(item.name)\n')
+    # Keep finished files if MediaStore publication fails, and never trust a remote filename as a path.
+    ds = ds.replace(
+        '            val done = Store.current().downloads.find { it.id == id } ?: return\n            mergeAndStore(done)\n            Store.patchDl(id) { it.copy(state = "completed", speed = 0, doneAt = System.currentTimeMillis(), got = it.size) }\n            notifyDone(done)',
+        '            val done = Store.current().downloads.find { it.id == id } ?: return\n            mergeAndStore(done)\n            val saved = Store.current().downloads.find { it.id == id } ?: done\n'
+        '            Store.patchDl(id) { it.copy(state = "completed", speed = 0, doneAt = System.currentTimeMillis(), got = it.size) }\n'
+        '            notifyDone(Store.current().downloads.find { it.id == id } ?: saved)'
+    )
+    # Replace the entire merge method with an API-aware, no-data-loss implementation.
+    a = ds.find("    private fun mergeAndStore(item: DlItem) {")
+    z = ds.find("    private fun dropParts(id: String)", a)
+    if a < 0 or z < 0:
+        raise SystemExit("[migrate] mergeAndStore boundaries not found")
+    merge = """    private fun mergeAndStore(item: DlItem) {
+        val appDownloadsDir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+            ?: File(filesDir, "downloads")
+        if (!appDownloadsDir.exists() && !appDownloadsDir.mkdirs()) {
+            throw IllegalStateException("تعذر إنشاء مجلد التنزيلات")
+        }
+        val cleanName = safeOutputName(item.name)
+        val out = File(appDownloadsDir, "${item.id}_${cleanName}").canonicalFile
+        if (out.parentFile?.canonicalFile != appDownloadsDir.canonicalFile) {
+            throw SecurityException("مسار حفظ غير آمن")
+        }
+        out.outputStream().buffered().use { os ->
+            for (i in 0 until maxOf(item.parts, 1)) {
+                val part = File(partDir(), "${item.id}.$i.part")
+                if (!part.isFile) throw IllegalStateException("جزء التنزيل رقم ${i + 1} غير مكتمل")
+                part.inputStream().buffered().use { it.copyTo(os) }
+            }
+        }
+
+        val publicLocation = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            publishToMediaStore(out, cleanName, item.mime)
+        } else {
+            publishToLegacyDownloads(out, cleanName)
+        }
+
+        // Keep a recoverable copy inside app storage whenever public publication fails.
+        val savedAs = publicLocation ?: out.absolutePath
+        Store.patchDl(item.id) { it.copy(savedAs = savedAs) }
+        if (publicLocation != null) out.delete()
+        dropParts(item.id)
+    }
+
+    private fun safeOutputName(raw: String): String {
+        val leaf = raw.substringAfterLast('/').substringAfterLast('\\\\')
+        return leaf
+            .replace(Regex("[\\\\u0000-\\\\u001F<>:\\\"/\\\\\\\\|?*]"), "_")
+            .trim().trim('.').take(120).ifBlank { "download" }
+    }
+
+    @SuppressLint("NewApi")
+    private fun publishToMediaStore(file: File, displayName: String, mime: String?): String? {
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, displayName)
+            put(MediaStore.Downloads.MIME_TYPE, mime ?: "application/octet-stream")
+            put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/DayFlow")
+            put(MediaStore.Downloads.IS_PENDING, 1)
+        }
+        val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return null
+        return try {
+            val output = contentResolver.openOutputStream(uri, "w")
+                ?: throw IllegalStateException("تعذر فتح ملف التنزيلات")
+            output.use { dst -> file.inputStream().use { src -> src.copyTo(dst) } }
+            val ready = ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }
+            contentResolver.update(uri, ready, null, null)
+            uri.toString()
+        } catch (_: Exception) {
+            contentResolver.delete(uri, null, null)
+            null
+        }
+    }
+
+    @SuppressLint("NewApi")
+    @Suppress("DEPRECATION")
+    private fun publishToLegacyDownloads(file: File, displayName: String): String? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) return null
+        if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+            return null
+        }
+        val folder = File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+            "DayFlow",
+        )
+        if (!folder.exists() && !folder.mkdirs()) return null
+        val target = File(folder, displayName).canonicalFile
+        if (target.parentFile?.canonicalFile != folder.canonicalFile) return null
+        return try {
+            file.copyTo(target, overwrite = true)
+            if (target.isFile && target.length() == file.length()) target.absolutePath else null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+"""
+    ds = ds[:a] + merge + ds[z:]
+    # Progress notifications and completion notifications are permission-aware.
+    ds = ds.replace(
+        '            nm().notify(notifId(id), progressNotification(item, pct, got, total))',
+        '            if (Notifications.hasPermission(this)) nm().notify(notifId(id), progressNotification(item, pct, got, total))'
+    )
+    ds = ds.replace(
+        '            .setContentText(fmtBytes(item.size))',
+        '            .setContentText(if (item.savedAs?.startsWith("content://") == true) "اتحفظ في التنزيلات / DayFlow" else "اتحفظ داخل مساحة التطبيق")'
+    )
+    ds = ds.replace(
+        '        nm().notify(notifId(item.id), NotificationCompat.Builder(this, Notifications.CH_DOWNLOADS)',
+        '        if (Notifications.hasPermission(this)) nm().notify(notifId(item.id), NotificationCompat.Builder(this, Notifications.CH_DOWNLOADS)'
+    )
+    # Balance the extra permission guard around the completed/failed notification builders.
+    ds = ds.replace(
+        '            .build())\n    }\n\n    private fun notifyFailed',
+        '            .build())\n    }\n\n    private fun notifyFailed'
+    )
+    ds = ds.replace(
+        '        nm().notify(notifId(item.id), NotificationCompat.Builder(this, Notifications.CH_DOWNLOADS)',
+        '        if (Notifications.hasPermission(this)) nm().notify(notifId(item.id), NotificationCompat.Builder(this, Notifications.CH_DOWNLOADS)'
+    )
+    ds = ds.replace('String.format("%.1f MB", b / 1e6)', 'String.format(Locale.US, "%.1f MB", b / 1e6)')
+    ds = ds.replace('String.format("%.2f GB", b / 1e9)', 'String.format(Locale.US, "%.2f GB", b / 1e9)')
+    dl.write_text(ds, encoding="utf-8")
+
+    # URLDecoder/URLEncoder Charset overloads were introduced after the app's
+    # minimum API. The string-name overload remains compatible with API 26+.
+    la = b/"download/LinkAnalyzer.kt"
+    ls = la.read_text(encoding="utf-8")
+    ls = ls.replace("URLDecoder.decode(it.replace(\\"\\", \\"\\"), Charsets.UTF_8)", "URLDecoder.decode(it.replace(\\"\\", \\"\\"), \\"UTF-8\\")")
+    ls = ls.replace("URLDecoder.decode(URI(url).path.split(\\"/\\").lastOrNull { it.isNotBlank() } ?: \\"\\", Charsets.UTF_8)", "URLDecoder.decode(URI(url).path.split(\\"/\\").lastOrNull { it.isNotBlank() } ?: \\"\\", \\"UTF-8\\")")
+    ls = ls.replace("java.net.URLEncoder.encode(base.url, Charsets.UTF_8)", "java.net.URLEncoder.encode(base.url, \\"UTF-8\\")")
+    ls = ls.replace(
+        "الصيغ الفعلية لهذا الموقع تُستخرج بمحرك yt-dlp/NewPipe المضمّن في حزمة التحميلات الكاملة؛ هنا المعاينة حقيقية (العنوان والغلاف والوصف) والتحميل المباشر فوري للروابط المباشرة وملفات HLS.",
+        "المعاينة تعرض البيانات التي أعادها الموقع. في هذا الإصدار يدعم التنزيل الملفات المباشرة وقوائم HLS فقط؛ الروابط التي تتطلب استخراجًا خاصًا بالموقع غير مدعومة."
+    )
+    la.write_text(ls, encoding="utf-8")
+
+    # Correct the API-31 exact-alarm settings action without referencing a new
+    # framework field on API 26-30.
+    alarm = b/"alarm/AlarmScheduler.kt"
+    edit(alarm,
+         'Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, Uri.parse("package:${ctx.packageName}"))',
+         'Intent(if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) "android.settings.REQUEST_SCHEDULE_EXACT_ALARM" else Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${ctx.packageName}"))', tag)
+
+    # A private PendingIntent receiver is only triggered by app-created alarms.
+    manifest = p/"app/src/main/AndroidManifest.xml"
+    ms = manifest.read_text(encoding="utf-8")
+    ms = ms.replace('<receiver android:name=".alarm.AlarmReceiver" android:exported="true">',
+                    '<receiver android:name=".alarm.AlarmReceiver" android:exported="false">')
+    manifest.write_text(ms, encoding="utf-8")
+
+    print("[migrate] Applied permission, Android API compatibility, download recovery and receiver hardening fixes")
     print("[migrate] Applied calendar, robot, downloader, notification, icon, layout and opt-in fixes")
 
 def refactor(p):
