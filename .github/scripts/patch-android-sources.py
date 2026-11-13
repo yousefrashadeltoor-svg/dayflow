@@ -249,8 +249,17 @@ fun Segmented(options: List<Pair<String, String>>, value: String, modifier: Modi
     ui = b/"ui/UiKit.kt"
     add_import(ui, "import androidx.compose.material3.ExperimentalMaterial3Api",
                "import androidx.compose.material3.Text", tag)
-    edit(ui, "@Composable\\nfun Honest(text: String) {",
-         "@OptIn(ExperimentalMaterial3Api::class)\\n@Composable\\nfun Honest(text: String) {", tag)
+    ui_lines = ui.read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(ui_lines):
+        if line.strip() == "fun Honest(text: String) {":
+            if index == 0 or "ExperimentalMaterial3Api" not in ui_lines[index - 1]:
+                if index == 0 or ui_lines[index - 1].strip() != "@Composable":
+                    raise SystemExit("[migrate] Honest() Compose annotation not found")
+                ui_lines[index - 1] = "@OptIn(ExperimentalMaterial3Api::class)"
+            break
+    else:
+        raise SystemExit("[migrate] Honest() declaration not found")
+    ui.write_text("\n".join(ui_lines) + "\n", encoding="utf-8")
     print("[migrate] Applied calendar, robot, downloader, notification, icon, layout and opt-in fixes")
 
 def refactor(p):
