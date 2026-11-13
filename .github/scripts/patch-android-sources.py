@@ -456,13 +456,8 @@ fun Segmented(options: List<Pair<String, String>>, value: String, modifier: Modi
     # minimum API. The string-name overload remains compatible with API 26+.
     la = b/"download/LinkAnalyzer.kt"
     ls = la.read_text(encoding="utf-8")
-    ls = ls.replace("URLDecoder.decode(it.replace(\\"\\", \\"\\"), Charsets.UTF_8)", "URLDecoder.decode(it.replace(\\"\\", \\"\\"), \\"UTF-8\\")")
-    ls = ls.replace("URLDecoder.decode(URI(url).path.split(\\"/\\").lastOrNull { it.isNotBlank() } ?: \\"\\", Charsets.UTF_8)", "URLDecoder.decode(URI(url).path.split(\\"/\\").lastOrNull { it.isNotBlank() } ?: \\"\\", \\"UTF-8\\")")
-    ls = ls.replace("java.net.URLEncoder.encode(base.url, Charsets.UTF_8)", "java.net.URLEncoder.encode(base.url, \\"UTF-8\\")")
-    ls = ls.replace(
-        "الصيغ الفعلية لهذا الموقع تُستخرج بمحرك yt-dlp/NewPipe المضمّن في حزمة التحميلات الكاملة؛ هنا المعاينة حقيقية (العنوان والغلاف والوصف) والتحميل المباشر فوري للروابط المباشرة وملفات HLS.",
-        "المعاينة تعرض البيانات التي أعادها الموقع. في هذا الإصدار يدعم التنزيل الملفات المباشرة وقوائم HLS فقط؛ الروابط التي تتطلب استخراجًا خاصًا بالموقع غير مدعومة."
-    )
+    # Use the legacy Charset-name overload available on the app's minSdk (26).
+    ls = ls.replace(", Charsets.UTF_8)", ', "UTF-8")')
     la.write_text(ls, encoding="utf-8")
 
     # Correct the API-31 exact-alarm settings action without referencing a new
