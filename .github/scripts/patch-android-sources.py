@@ -252,10 +252,10 @@ fun Segmented(options: List<Pair<String, String>>, value: String, modifier: Modi
     ui_lines = ui.read_text(encoding="utf-8").splitlines()
     for index, line in enumerate(ui_lines):
         if line.strip() == "fun Honest(text: String) {":
-            if index == 0 or "ExperimentalMaterial3Api" not in ui_lines[index - 1]:
-                if index == 0 or ui_lines[index - 1].strip() != "@Composable":
-                    raise SystemExit("[migrate] Honest() Compose annotation not found")
-                ui_lines[index - 1] = "@OptIn(ExperimentalMaterial3Api::class)"
+            if index == 0 or ui_lines[index - 1].strip() != "@Composable":
+                raise SystemExit("[migrate] Honest() must retain its @Composable annotation")
+            if index < 2 or "ExperimentalMaterial3Api" not in ui_lines[index - 2]:
+                ui_lines.insert(index - 1, "@OptIn(ExperimentalMaterial3Api::class)")
             break
     else:
         raise SystemExit("[migrate] Honest() declaration not found")
